@@ -2,6 +2,8 @@
 
 This repository packages the current Kaggle baseline notebook and an ACL-style report draft for the NYU Tandon Deep Learning Spring 2026 text-to-SVG competition.
 
+GitHub repository: <https://github.com/sv2881/dl-spring-2026-svg-generation>
+
 The notebook implements a validity-first baseline built around:
 
 - `Qwen/Qwen2.5-1.5B-Instruct`
