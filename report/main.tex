@@ -1,5 +1,7 @@
 \documentclass[11pt]{article}
 \usepackage{acl}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
 \usepackage{times}
 \usepackage{latexsym}
 \usepackage{booktabs}
@@ -8,7 +10,7 @@
 \usepackage{graphicx}
 \usepackage{url}
 
-\title{A Validity-First LoRA Baseline for Text-to-SVG Generation}
+\title{A Validity-First Baseline for Text-to-SVG Generation with Quantized LoRA Fine-Tuning}
 
 \author{
 Siva Srinivas Venigalla \\
@@ -20,69 +22,69 @@ New York University Tandon School of Engineering \\
 \maketitle
 
 \begin{abstract}
-This report presents a reproducible baseline for the DL Spring 2026 text-to-SVG Kaggle competition. The system fine-tunes \texttt{Qwen2.5-1.5B-Instruct} with LoRA on the provided prompt--SVG pairs, then applies strict SVG repair, validation, and a TF-IDF retrieval fallback to satisfy competition constraints. The saved notebook run demonstrates a 100\% syntactic validity rate on the generated submission file and completes inference for 1,000 hidden prompts in 57.32 minutes on a Tesla T4 GPU. However, qualitative inspection shows that the current baseline often collapses to a generic fallback SVG, indicating that validity is high but semantic fidelity remains weak. This makes the current system a useful reproducible baseline, but not yet a competitive final entry.
+This report presents a reproducible baseline for the DL Spring 2026 text-to-SVG Kaggle competition. The task requires generating valid SVG code from natural-language prompts under strict notebook execution limits and hard validity constraints. Our system combines parameter-efficient fine-tuning of \texttt{Qwen2.5-1.5B-Instruct} with a validity-oriented post-processing pipeline that repairs malformed SVGs, enforces required canvas attributes, and applies a lightweight retrieval fallback when generation fails. In the saved notebook run, the full inference pipeline produces a Kaggle-formatted submission for 1,000 hidden prompts, achieves a 100\% SVG validity rate under local checks, and completes inference in 57.32 minutes on a Tesla T4 GPU. Qualitative inspection, however, shows that the current baseline often collapses to a generic fallback SVG, indicating that high validity does not yet translate into strong semantic fidelity. We therefore position this system as a reliable and reproducible baseline rather than a strong final competition entry.
 \end{abstract}
 
 \section{Introduction}
-The DL Spring 2026 Kaggle contest asks students to generate valid SVG code directly from natural-language prompts. Unlike many open-ended generative tasks, this competition applies a hard validity gate before scoring semantic quality. Any SVG that fails parsing, violates the allowed-tag set, exceeds complexity limits, or fails to render receives a zero for that sample. As a result, a reasonable first milestone is to build a pipeline that is reliably valid under Kaggle's execution and safety constraints.
+The DL Spring 2026 Kaggle competition focuses on text-to-SVG generation: given a natural-language description of an icon or scene, the goal is to produce SVG code that is both valid and visually faithful to the prompt. This task is interesting because it lies at the intersection of language modeling, structured code generation, and visual representation learning. Unlike open-ended text generation tasks, SVG generation imposes strict structural and syntactic constraints. A model must not only describe the requested object correctly, but must also output parser-valid XML that uses an approved set of SVG tags and renders successfully within a fixed canvas size.
 
-The baseline in this repository is designed around that objective. It uses a compact instruction-tuned language model, parameter-efficient adaptation with LoRA \citep{hu2022lora}, quantized loading in the style of QLoRA \citep{dettmers2023qlora}, and a lightweight retrieval fallback to recover from malformed generations. The central design choice is pragmatic: prioritize a stable, reproducible, Kaggle-compatible system before optimizing leaderboard performance.
+The competition setup makes this constraint especially important. The evaluation pipeline first applies a hard validity gate. Any output that fails parsing, violates the allowed SVG specification, exceeds complexity limits, or does not render properly receives a score of zero for that sample. Only valid SVGs proceed to downstream quality scoring, where visual fidelity, structural similarity, and compactness are assessed. This design means that a pipeline with impressive-looking but unreliable generations can perform worse than a simpler method that consistently produces valid outputs.
 
-\section{Dataset}
-The notebook uses only the provided competition data. In the saved run, the training file contains 50,000 prompt--SVG pairs and the hidden-test file contains 1,000 prompts. Each training row provides an \texttt{id}, a natural-language \texttt{prompt}, and a target \texttt{svg}. The test set contains \texttt{id} and \texttt{prompt} only.
+That observation motivates the approach in this report. Instead of starting with a large or computationally expensive model, we build a conservative baseline that emphasizes reproducibility, validity, and compatibility with Kaggle notebook limits. The core system uses a compact instruction-tuned language model adapted with LoRA \citep{hu2022lora} and loaded with 4-bit quantization in the spirit of QLoRA \citep{dettmers2023qlora}. Around this model, we add deterministic SVG repair and validation routines together with a fallback retrieval mechanism. The resulting system is not yet optimized for leaderboard performance, but it establishes a strong reproducibility baseline and exposes clear failure modes that guide future work.
 
-Before training, the notebook performs lightweight filtering and repair:
+\section{Task Setting and Evaluation}
+Each sample in the competition consists of one text prompt and requires one SVG string as output. The expected output format is a root \texttt{<svg>} element with canvas size \(256 \times 256\), together with a restricted set of supported child elements such as \texttt{path}, \texttt{rect}, \texttt{circle}, \texttt{polygon}, and other standard drawing primitives. The competition also limits SVG size and complexity, including a maximum length of 16,000 characters and a path-count cap.
 
-\begin{itemize}
-\item empty prompts are removed;
-\item SVG strings are normalized by extracting the root \texttt{<svg>} block when present;
-\item missing namespace or canvas attributes are inserted;
-\item XML declarations, doctypes, and comments are removed;
-\item overlong or malformed SVGs are rejected.
-\end{itemize}
+The evaluation metric is intentionally staged. First, the submission passes through a hard validity gate. This gate checks parse success, tag-level safety, renderability, and complexity compliance. If the SVG fails any of these checks, it receives zero credit. For valid SVGs, the scoring pipeline then compares the rendered image against a hidden reference using a weighted combination of visual fidelity, structural similarity, and compactness. As a result, a reasonable baseline strategy is to first maximize the probability of validity, and only then improve semantic alignment and visual detail.
 
-All 50,000 rows in the saved run passed the initial cleaning stage. For feasibility on modest GPU hardware, the notebook then constructs a balanced subset by binning prompt lengths and SVG lengths, producing 8,500 usable examples. From this subset, 8,000 rows are used for training and 425 for validation.
+This scoring setup strongly influences our modeling choices. In a standard generative setting, aggressive decoding or longer outputs might help expressiveness. In this competition, however, those same choices can easily increase malformed tags, broken nesting, or overlong outputs. Our baseline therefore uses conservative decoding and explicit post-processing to reduce invalid generations. This is a deliberate design decision rather than an accidental limitation.
 
-\section{Methodology}
-\subsection{Model}
-The base model is \texttt{Qwen/Qwen2.5-1.5B-Instruct} \citep{qwen25}. This choice keeps the parameter count below the course guidance while preserving enough capacity to model the mapping from text descriptions to short SVG programs.
+\section{Dataset and Preprocessing}
+The notebook uses only the data provided by the competition organizers. In the saved run, the training set contains 50,000 prompt--SVG pairs and the hidden test set contains 1,000 prompts. Each training example includes an \texttt{id}, a natural-language \texttt{prompt}, and a target \texttt{svg}. The test set includes \texttt{id} and \texttt{prompt}, and the competition sample submission defines the required CSV schema.
 
-LoRA adapters are attached to the projection layers
-\texttt{q\_proj}, \texttt{k\_proj}, \texttt{v\_proj}, \texttt{o\_proj},
-\texttt{up\_proj}, \texttt{down\_proj}, and \texttt{gate\_proj}.
-The saved run reports 18,464,768 trainable parameters out of 1,562,179,072 total parameters, or roughly 1.18\% of the model.
+Because SVG data is structured but noisy, preprocessing is a critical part of the pipeline. The notebook first normalizes missing values and ensures that prompt and SVG fields are treated as strings. It then applies a lightweight cleaning function that attempts to extract the root SVG span from each training example, remove XML declarations and comments, compress redundant whitespace, restore required canvas attributes when absent, and reject malformed or overlong examples. The cleaning stage is intentionally simple: it is designed to enforce submission safety without introducing heavy parsing logic that would be difficult to maintain inside a Kaggle notebook.
 
-\subsection{Prompting Format}
-Each example is converted into a short instruction-style text block:
+In the saved notebook output, all 50,000 training rows remain usable after the cleaning pass. For training efficiency, the notebook does not fine-tune on the full dataset directly. Instead, it constructs a balanced subset based on prompt length and SVG length. Prompt lengths and SVG lengths are binned into quantiles, and examples are sampled across these buckets to preserve some diversity in both textual complexity and output complexity. This procedure yields 8,500 examples, from which 8,000 are used for training and 425 for validation.
+
+This sampling strategy is pragmatic. The competition environment rewards notebook reproducibility under constrained resources, and full-scale fine-tuning on all 50,000 examples is more expensive than necessary for an initial baseline. By using a structured subset, the notebook remains runnable on a Tesla T4 while still exposing the model to a range of short and long prompts as well as simple and complex SVGs.
+
+\section{Model Description}
+\subsection{Base Model}
+The generative backbone is \texttt{Qwen/Qwen2.5-1.5B-Instruct} \citep{qwen25}. This model was selected for three reasons. First, it is small enough to fit within a notebook-friendly fine-tuning regime. Second, it is already instruction tuned, which makes it a reasonable starting point for prompt-conditioned structured generation. Third, it offers enough capacity to model the mapping from short textual descriptions to short symbolic programs such as SVG code.
+
+\subsection{Parameter-Efficient Adaptation}
+Rather than full-model fine-tuning, we use LoRA adapters \citep{hu2022lora} attached to the key projection layers:
+\texttt{q\_proj}, \texttt{k\_proj}, \texttt{v\_proj}, \texttt{o\_proj}, \texttt{up\_proj}, \texttt{down\_proj}, and \texttt{gate\_proj}. This keeps the trainable portion of the model small while preserving most pretrained weights. In the saved run, the notebook reports 18,464,768 trainable parameters out of 1,562,179,072 total parameters, which corresponds to roughly 1.18\% of the full model.
+
+This parameter-efficient setup is useful for two reasons. It reduces memory pressure during fine-tuning, and it also makes the method easier to share and reproduce because only adapter weights need to be stored and transferred. For a course competition where reproducibility matters, this is a strong practical advantage.
+
+\subsection{Quantized Loading}
+When a CUDA-enabled GPU is available, the model is loaded in 4-bit NF4 quantized form with double quantization and half-precision compute. This follows the general efficiency philosophy of QLoRA \citep{dettmers2023qlora}. If quantized loading fails, the notebook falls back to a standard model load. In the saved run, 4-bit loading succeeds on a Tesla T4, which makes the full training and inference process feasible within a notebook workflow.
+
+\subsection{Training Format}
+Each training example is transformed into a short instruction-style sequence:
 \begin{quote}
 \small
-\texttt{System: Generate a compact valid SVG ...}\\
+\texttt{System: Generate a compact valid SVG from the user prompt. Return only SVG code. Use a single root <svg> element with width='256' height='256' viewBox='0 0 256 256'. Keep the SVG short and visually faithful.}\\
 \texttt{User: <prompt>}\\
 \texttt{Assistant: <svg>}
 \end{quote}
 
-This formatting keeps the task explicit while remaining simple enough for fast tokenization and fine-tuning. During inference, the same prompt structure is used but the assistant response is left blank for generation.
+This formatting serves two purposes. First, it makes the task explicit to an instruction-tuned model. Second, it keeps the sequence short enough for efficient tokenization and training at a maximum sequence length of 512 tokens. During inference, the prompt uses the same structure but leaves the assistant response empty so the model can generate SVG code directly.
 
-\subsection{Quantization and Training Strategy}
-When a GPU is available, the notebook attempts 4-bit NF4 quantized loading with double quantization and half-precision compute. This substantially reduces memory usage and allows LoRA fine-tuning on a Tesla T4 GPU. If 4-bit loading fails, the notebook falls back to a standard model load.
+\subsection{Validity-Oriented Post-Processing}
+The most distinctive aspect of this baseline is the deterministic post-processing stage. After generation, the notebook attempts to extract the SVG block, remove extraneous text, restore required root attributes, enforce the character-length limit, and validate the final string with \texttt{lxml}. If the generated output is malformed, the system does not trust it. Instead, it falls back to a secondary mechanism.
 
-\subsection{SVG Repair and Validation}
-Because invalid SVGs receive zero credit, the pipeline includes several post-processing checks:
-
-\begin{itemize}
-\item extraction of the generated SVG span from raw text;
-\item reinsertion of required \texttt{xmlns}, \texttt{width}, \texttt{height}, and \texttt{viewBox} attributes when missing;
-\item length filtering against the 16,000-character limit;
-\item XML parsing with \texttt{lxml} to reject malformed outputs.
-\end{itemize}
-
-If generation fails these checks, the notebook falls back to a retrieval-based SVG or, in the worst case, to a minimal hand-written SVG consisting of a white background and a black circle. This fallback is intentionally simple: it protects the submission from invalid outputs, but may sacrifice semantic quality.
+This design is intentionally conservative. A more ambitious system might let the model produce longer or more expressive outputs, but this baseline treats validity as the first priority because invalid outputs score zero in the competition.
 
 \subsection{Retrieval Fallback}
-The notebook includes a TF-IDF prompt retriever built over the cleaned training prompts. For a malformed generation, the system retrieves the nearest prompt in the training subset and reuses the corresponding cleaned SVG. This component is not the main modeling strategy; it is included as a practical safeguard for Kaggle submission robustness.
+To reduce the chance of invalid or empty outputs, the notebook includes a TF-IDF retrieval fallback built over cleaned training prompts. If the generated SVG does not pass validation, the system retrieves the most similar prompt from the training subset and reuses its cleaned SVG. If that still fails, the notebook falls back to a minimal hand-written SVG containing a white background and a black circle.
 
-\section{Experimental Setup}
-Table~\ref{tab:hparams} lists the main hyperparameters used in the saved notebook run.
+This fallback strategy should not be interpreted as the main modeling contribution. It is a safety mechanism designed to guarantee submission robustness. Its presence is nevertheless important, because the saved outputs suggest that this backup path is triggered often enough to dominate qualitative behavior.
+
+\section{Experimentation}
+\subsection{Training Configuration}
+Table~\ref{tab:hparams} summarizes the primary hyperparameters from the saved notebook run.
 
 \begin{table}[t]
 \centering
@@ -94,29 +96,39 @@ Setting & Value \\
 Base model & \texttt{Qwen2.5-1.5B-Instruct} \\
 Training rows & 8,000 \\
 Validation rows & 425 \\
-Sequence length & 512 \\
-Max new tokens & 180 \\
+Max sequence length & 512 \\
+Max generation tokens & 180 \\
 LoRA rank & 16 \\
 LoRA alpha & 16 \\
 LoRA dropout & 0.05 \\
 Epochs & 1 \\
 Per-device batch size & 1 \\
-Gradient accumulation & 4 \\
-Learning rate & $2 \times 10^{-4}$ \\
+Gradient accumulation steps & 4 \\
+Learning rate & \(2 \times 10^{-4}\) \\
 Warmup steps & 30 \\
 Weight decay & 0.01 \\
 Inference batch size & 8 \\
-Seed & 42 \\
+Random seed & 42 \\
 \bottomrule
 \end{tabular}
-\caption{Key hyperparameters used in the baseline notebook.}
+\caption{Main hyperparameters used in the baseline notebook.}
 \label{tab:hparams}
 \end{table}
 
-The saved notebook output reports a Tesla T4 GPU and successful 4-bit model loading. Inference over the 1,000 hidden test prompts completed in 57.32 minutes, which fits the intended notebook-based workflow but leaves limited budget for larger models or expensive search.
+The notebook fixes seeds for Python, NumPy, and PyTorch to improve reproducibility. It also uses deterministic preprocessing and a fixed training-validation split after shuffled sampling. The saved execution reports successful model loading, successful LoRA attachment, tokenization of all selected training and validation examples, and completion of one epoch of fine-tuning.
+
+\subsection{Hardware and Runtime}
+The saved notebook outputs report a Tesla T4 GPU with CUDA enabled. Under this setup, inference over the 1,000 hidden test prompts completes in 57.32 minutes. This runtime is important because the competition evaluates Kaggle notebook submissions under finite compute budgets. A method that is slightly stronger but significantly slower may not be practical if it risks timing out or exceeding resource limits.
+
+\subsection{What We Tried}
+The current baseline reflects three deliberate design choices.
+
+First, we use a compact model rather than a larger foundation model. This makes the notebook runnable and reproducible without relying on very high-end hardware. Second, we use LoRA and 4-bit loading so that the model can actually be fine-tuned within the available budget. Third, we prioritize validity with repair and fallback logic, because a visually promising but invalid SVG is worthless under the competition scoring function.
+
+At the same time, the notebook currently explores only one main fine-tuning configuration: one epoch, an 8k sampled training set, conservative decoding, and fallback-based repair. This should be understood as a baseline experiment, not as an exhaustive tuning effort.
 
 \section{Results}
-Table~\ref{tab:results} summarizes the directly observed outcomes from the saved notebook execution.
+Table~\ref{tab:results} summarizes the metrics that are directly supported by the saved notebook outputs.
 
 \begin{table}[t]
 \centering
@@ -125,35 +137,55 @@ Table~\ref{tab:results} summarizes the directly observed outcomes from the saved
 \toprule
 Metric & Observed value \\
 \midrule
-Submission rows & 1,000 \\
+Training rows after filtering & 50,000 \\
+Rows used for fine-tuning & 8,000 \\
+Validation rows & 425 \\
+Hidden test rows & 1,000 \\
+Submission rows generated & 1,000 \\
 Rows starting with \texttt{<svg>} & 100.0\% \\
 Valid SVG rate & 100.0\% \\
 Inference time & 57.32 minutes \\
-Saved Kaggle format & Yes \\
-Public leaderboard score & \textbf{TBD} \\
-Private leaderboard score & \textbf{TBD} \\
+Public leaderboard score & \textbf{Insert after submission} \\
+Private leaderboard score & \textbf{Insert after competition close} \\
 \bottomrule
 \end{tabular}
-\caption{Results directly supported by the notebook outputs.}
+\caption{Results directly supported by the saved notebook execution.}
 \label{tab:results}
 \end{table}
 
-The strongest outcome of this baseline is validity: every row in the final submission passes the notebook's SVG validity check, and every row begins with a proper \texttt{<svg>} root tag. This directly supports the design goal of avoiding zero-score samples caused by malformed outputs.
+The clearest success of the baseline is reliability. The submission file contains the expected 1,000 rows, every row begins with a proper \texttt{<svg>} root element, and every SVG passes the notebook's validity checks. From a competition perspective, this is meaningful: it substantially reduces the risk of receiving zero-score samples due to malformed output.
 
-The main weakness is semantic collapse. The notebook's sanity-check examples repeatedly produce the same fallback SVG instead of prompt-specific graphics. This suggests that the current model either fails to generate useful SVGs after fine-tuning or is triggering the fallback path too frequently. In either case, the observed behavior indicates low visual fidelity despite perfect validity.
+However, the same saved notebook also reveals the baseline's major weakness. The qualitative sanity-check examples repeatedly produce the same generic fallback SVG instead of prompt-specific drawings. This means that although the final submission is highly valid, it is not yet strongly aligned with the semantic content of the prompts. Put differently, the system succeeds on the validity gate but appears weak on the downstream visual-fidelity objective.
 
-\section{Ablations and Failure Analysis}
-The current repository contains one end-to-end baseline configuration rather than a full ablation sweep. That is a limitation of the present report. For the final version, the following controlled ablations should be added because they directly test the assumptions of the pipeline:
+This is an important result rather than merely a disappointing one. It demonstrates that the text-to-SVG problem cannot be solved by syntactic correctness alone. A strong competition system must satisfy both halves of the problem: structural validity and visual specificity. Our baseline currently handles the first requirement much better than the second.
+
+\subsection{Leaderboard Performance}
+At the time this report draft was prepared, the repository and notebook were ready for Kaggle code submission, but the final public and private leaderboard values had not yet been inserted into the manuscript. The report therefore leaves those numbers as placeholders. Once the final Kaggle run is locked, these values should be added directly to Table~\ref{tab:results} together with a short sentence comparing them against the validity-focused baseline behavior described above.
+
+\section{Analysis, Ablations, and Failure Modes}
+The current report is strongest on methodology and reproducibility, but it is limited in terms of experimental breadth. In particular, the notebook does not yet contain a full ablation suite. This section therefore serves two roles: it documents the most likely failure modes visible in the current outputs, and it defines the most important ablations that should be run next.
+
+\subsection{Observed Failure Modes}
+The most obvious failure mode is fallback domination. The generated outputs shown in the notebook's sanity check are not merely low quality; they are almost identical across unrelated prompts. Our interpretation is that the generative model frequently produces malformed or otherwise rejected outputs, causing the pipeline to back off to the safety SVG. This behavior guarantees validity, but it destroys prompt-specificity.
+
+A second likely issue is under-training. The current setup uses one epoch over a subset of 8,000 training examples. That is enough to establish a baseline, but it may not be enough to meaningfully adapt the model to SVG syntax and composition patterns. Because SVG generation is effectively a code-generation problem with strong structural regularities, the model may require either more steps, a richer subset, or curriculum-style formatting to learn useful output patterns.
+
+A third likely issue is objective mismatch. The model is trained with next-token prediction over prompt-plus-SVG sequences, while the competition metric ultimately depends on rendering-based similarity and structural correspondence. A model that learns generic SVG templates may still obtain reasonable language-model loss without becoming visually faithful. This mismatch is common in generative structured-output tasks and likely contributes to the weak qualitative behavior here.
+
+\subsection{Recommended Ablations}
+To strengthen the final report and better align with the course rubric on ablations and rigor, the following experiments should be run:
 
 \begin{itemize}
-\item \textbf{No retrieval fallback}: measure how much of the 100\% validity rate comes from the backup mechanism rather than the generative model itself.
-\item \textbf{No SVG repair}: measure how often the raw model output is already valid before post-processing.
-\item \textbf{Different training subset sizes}: compare 2k, 8k, and full-data fine-tuning to test whether the model is underfit.
-\item \textbf{Different LoRA ranks}: compare rank 8, 16, and 32 to test capacity limits under the same compute budget.
-\item \textbf{Different decoding limits}: compare max generation lengths and decoding strategies to see whether truncation is contributing to malformed or generic outputs.
+\item \textbf{No retrieval fallback.} This experiment measures how much of the final validity rate is produced by the model itself versus the backup mechanism.
+\item \textbf{No SVG repair.} This isolates the benefit of post-processing and reveals how often the raw model output is already valid.
+\item \textbf{Training-set size sweep.} Compare 2k, 8k, and a larger subset or full training set to determine whether the model is severely data-limited.
+\item \textbf{LoRA capacity sweep.} Compare multiple LoRA ranks, such as 8, 16, and 32, to test whether adapter capacity is constraining the model.
+\item \textbf{Epoch sweep.} Compare one, two, and three epochs to see whether the current setup is simply under-trained.
+\item \textbf{Decoding ablation.} Compare greedy decoding against lightweight beam search or carefully constrained sampling to determine whether malformed outputs are primarily a decoding issue.
+\item \textbf{Prompt-format ablation.} Compare the current instruction format against alternative template styles that emphasize SVG-only output more aggressively.
 \end{itemize}
 
-Even without the full sweep, the saved outputs already reveal one clear failure mode: the validity-oriented fallback dominates qualitative behavior. This means the current baseline is conservative and robust, but it is not yet learning prompt-conditioned SVG structure well enough to compete on the leaderboard.
+These ablations are not optional if the goal is a strong final report. They directly answer the most important methodological questions raised by the current baseline and would materially improve the report's rigor.
 
 \section{Code and Reproducibility}
 The code repository for this project is:
@@ -162,21 +194,28 @@ The code repository for this project is:
 \url{https://github.com/sv2881/dl-spring-2026-svg-generation}
 \end{quote}
 
-The notebook fixes random seeds for Python, NumPy, and PyTorch and produces a Kaggle-ready CSV file with the required \texttt{id,svg} schema. The repository also includes a dependency list in \texttt{requirements.txt} and preserves the exact notebook used to generate the baseline results.
+The repository includes the notebook used for the saved run, a dependency list, and an ACL-style report draft. The code is organized so that another student or instructor can inspect the exact preprocessing, model configuration, fine-tuning setup, and submission-generation logic used in the baseline.
 
-The report should also include a public link to the final trained adapter weights. At the time of writing, that link still needs to be added:
+From a reproducibility standpoint, the current project already satisfies several important requirements. It fixes random seeds, uses only the provided competition data, generates the required Kaggle submission schema, and records a complete end-to-end notebook. The use of LoRA also makes model sharing more practical because the fine-tuned state can be distributed as adapter weights rather than as a full large checkpoint.
+
+The one remaining missing artifact is a public model-weights link. That should be added before final submission:
 \begin{quote}
 \small
-\texttt{[Add model-weights URL here]}
+\texttt{[Insert Hugging Face, Google Drive, or other public weights URL here]}
 \end{quote}
 
 \paragraph{AI Tool Disclosure}
-LLM-based tooling was used for code cleanup, debugging assistance, repository organization, and report drafting. Final methodological decisions, experiment selection, and result interpretation were manually reviewed by the author.
+LLM-based assistance was used for code cleanup, debugging support, repository organization, and report drafting. Final experimental choices, interpretations, and the report content were manually reviewed and edited by the author.
+
+\section{Limitations and Future Work}
+This report documents a baseline, not a final optimized system. Its main limitation is clear: the current pipeline is much better at producing valid SVGs than at producing accurate SVGs. That tradeoff is acceptable for an initial system, but it is not sufficient for strong competition performance. The present method also relies on a retrieval fallback, which improves safety but may reduce originality and prompt specificity when triggered too often.
+
+There are several promising directions for future work. One direction is to improve data usage by training on a larger portion of the provided dataset or by constructing curriculum subsets that gradually increase SVG complexity. A second direction is to improve output control with stricter constrained decoding or intermediate structured representations. A third direction is to enrich evaluation during development by rendering predictions and comparing them visually rather than relying only on validity checks. Finally, the retrieval fallback could be made more selective so that it activates only when truly necessary instead of dominating qualitative behavior.
 
 \section{Conclusion}
-This project establishes a reproducible baseline for the DL Spring 2026 text-to-SVG competition. The current system is strong on validity and Kaggle compatibility: it fine-tunes within modest hardware limits, generates a fully valid submission file, and avoids malformed SVG outputs. However, the saved qualitative outputs show that the model is not yet producing prompt-specific graphics reliably, so leaderboard performance is likely limited in its current form.
+This report presented a validity-first baseline for the DL Spring 2026 text-to-SVG competition. The method combines a compact instruction-tuned language model, LoRA-based parameter-efficient fine-tuning, quantized loading for notebook feasibility, and a deterministic repair-and-fallback pipeline for robust SVG generation. In the saved notebook run, the method generates a fully valid submission file for 1,000 hidden prompts and does so within a practical runtime budget on a Tesla T4 GPU.
 
-The next stage should focus on reducing dependence on the fallback path and improving prompt-conditioned SVG generation quality. The most important near-term work is a controlled ablation study over retrieval fallback, repair logic, training subset size, and LoRA capacity, followed by measurement on the Kaggle public leaderboard.
+At the same time, the qualitative outputs show that validity alone is not enough. The current system often collapses to a generic fallback SVG, which strongly limits visual fidelity and likely limits leaderboard performance. The most important next step is therefore not merely to train longer, but to run targeted ablations that distinguish the effect of model learning from the effect of the safety pipeline. That will produce a stronger final method and, equally importantly, a more rigorous final report.
 
 \bibliographystyle{acl_natbib}
 \bibliography{references}
